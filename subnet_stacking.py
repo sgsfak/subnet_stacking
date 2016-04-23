@@ -15,6 +15,7 @@ import sklearn.base
 from scipy.special import logit
 from scipy.special import expit
 import scipy.optimize
+from joblib import Parallel, delayed
 
 __author__ = "Stelios Sfakianakis"
 __email__ = "sgsfak@gmail.com"
@@ -44,7 +45,7 @@ class SubnetBaseClassifier(sklearn.base.BaseEstimator, sklearn.base.ClassifierMi
         """Returns the 'neighbors' located at most `d` in distance"""
         if not d:
             d = self.max_distance
-        return [g for g,v in self.neighbors.iteritems() if v <= d]
+        return [g for g,v in self.neighbors.items() if v <= d]
 
     def get_params(self, deep=True):
         return {"seed_gene": self.seed,
@@ -85,7 +86,7 @@ class SubnetStackingClassifier(sklearn.base.BaseEstimator, sklearn.base.Classifi
         # The supplied `seed_with_neighbors` contain for each 'neighbor'
         # (i.e. gene) its weight in the induced subnetwork. The "distance"
         # of each neighbor is determined by their -log(1/Sum_i w_i)
-        for seed, neighbors in self.normalized_seeds_with_neighbors_.iteritems():
+        for seed, neighbors in self.normalized_seeds_with_neighbors_.items():
             if seed not in neighbors:
                 # Give the seed the most weight:
                 m = max(neighbors.values()) + 1
@@ -104,7 +105,7 @@ class SubnetStackingClassifier(sklearn.base.BaseEstimator, sklearn.base.Classifi
         # of the distribution of "distances"
         distances = self.normalized_seeds_with_neighbors_[seed].values()
         q = np.array(n) * 100.0 / len(distances)
-        return np.percentile(distances, q=q)
+        return np.percentile(list(distances), q=q)
 
     def get_params(self, deep=True):
         out = { 'seeds_with_neighbors': self.seeds_with_neighbors,
@@ -117,7 +118,7 @@ class SubnetStackingClassifier(sklearn.base.BaseEstimator, sklearn.base.Classifi
         return out
 
     def _features(self):
-        return set([n for neighbors in self.seeds_with_neighbors.itervalues()
+        return set([n for neighbors in self.seeds_with_neighbors.values()
             for n in neighbors.keys()])
 
     def _create_base_clf(self, seed, max_distance=1.):
@@ -164,8 +165,8 @@ class SubnetStackingClassifier(sklearn.base.BaseEstimator, sklearn.base.Classifi
                 base_predict = base_predict[0,1]
                 base_predictions[element_to_test].append( (seed, base_predict) )
         # now we need to go through their predictions and train the second level classifier
-        X2 = np.array([[i[1] for i in v] for tested_elem, v in base_predictions.iteritems()])
-        Y2 = np.array([ y[tested_elem] for tested_elem in base_predictions.iterkeys()])
+        X2 = np.array([[i[1] for i in v] for tested_elem, v in base_predictions.items()])
+        Y2 = np.array([ y[tested_elem] for tested_elem in base_predictions.keys()])
         self.meta_clf_ = ensemble.RandomForestClassifier(n_estimators=200,
                 criterion='entropy', max_features=None,
                 #max_depth=None, min_samples_split=1,
@@ -251,9 +252,25 @@ def score_clfs_in_df(clfs, X, Y, n_iter=10, test_size=0.3, random_state=0xBABE, 
         #scores.append([measure_classification(clf, X.iloc[testing], Y[testing]) for clf in fitted_clfs])
         scores.append( evaluate_classifiers(fitted_clfs_i, X.iloc[testing], Y[testing], pos_label) )
         fitted_clfs.append(fitted_clfs_i)
-        if verbose: print "* %d / %d" % (i, n_iter)
+        if verbose: print("* %d / %d" % (i, n_iter))
         i += 1
     return scores, fitted_clfs
 
+def train_test_job(X,Y, training, testing, clfs, pos_label=1):
+    fitted_clfs_i = [clf.fit(X.iloc[training], Y[training]) for clf in clfs]
+    #scores.append([measure_classification(clf, X.iloc[testing], Y[testing]) for clf in fitted_clfs])
+    score = evaluate_classifiers(fitted_clfs_i, X.iloc[testing], Y[testing], pos_label)
+    return (score, fitted_clfs_i)
+
+def score_clfs_in_df_parallel(clfs, X, Y, n_iter=10, test_size=0.3, random_state=0xBABE, pos_label=1, n_jobs=-1, verbose=True):
+    iterable = sklearn.cross_validation.StratifiedShuffleSplit(Y, n_iter=n_iter, test_size=test_size, random_state=random_state)
+    splits = [(training, testing) for training,testing in iterable]
+    verbosity = 0
+    if verbose:
+        verbosity = 10
+    results = Parallel(n_jobs=n_jobs, verbose=verbosity)(delayed(train_test_job)(X, Y, training, testing, clfs, pos_label=pos_label) for training,testing in splits)
+    scores = [r[0] for r in results]
+    fitted_clfs = [r[1] for r in results]
+    return scores, fitted_clfs
 
 # vim: tabstop=8 expandtab shiftwidth=4 softtabstop=4
